@@ -1,0 +1,62 @@
+# Compiled project executables
+/B_smooth_finder
+/isogeny_walk_general
+/isogeny_finder_general
+/isogeny_walk_fp2_flint
+
+# C/C++ object files and libraries
+*.o
+*.obj
+*.lo
+*.a
+*.la
+*.so
+*.so.*
+*.dylib
+*.dll
+*.lib
+*.exe
+*.out
+*.bin
+
+# Build-system output
+/build/
+/build-*/
+/cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+autom4te.cache/
+.deps/
+.libs/
+
+# Debugging, profiling, sanitizers, and coverage
+core
+core.*
+vgcore.*
+gmon.out
+*.dSYM/
+*.gcda
+*.gcno
+*.gcov
+*.profraw
+*.profdata
+*.su
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.bak
+*~
+
+# Editor and IDE metadata
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
