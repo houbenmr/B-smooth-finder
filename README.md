@@ -1,3 +1,5 @@
+**WARNING: This code was created with assistance from ChatGPT Sol 5.6. It is research/prototype software and may contain serious mathematical or implementation mistakes.**
+
 ## Programs
 
 ### `find_smooth_path.c`
