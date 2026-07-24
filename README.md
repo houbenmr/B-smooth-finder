@@ -1,4 +1,4 @@
-**WARNING: This code was created with assistance from ChatGPT Sol 5.6. It is research/prototype software and may contain serious mathematical or implementation mistakes.**
+**WARNING: The files in this repository were created with assistance from ChatGPT Sol 5.6. It is research/prototype software and may contain serious mathematical or implementation mistakes.**
 
 ## Programs
 
