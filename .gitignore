@@ -1,4 +1,6 @@
 # Compiled project executables
+/find_smooth_path
+/random_walk
 /B_smooth_finder
 /isogeny_walk_general
 /isogeny_finder_general
