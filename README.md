@@ -1,5 +1,9 @@
 **WARNING: The files in this repository were created with assistance from ChatGPT Sol 5.6 (i.e. *vibecoded*). It is research/prototype software and may contain serious mathematical or implementation mistakes. Use at your own risk.**
 
+The development of this software, in particular the first two input modes below, was inspired by the recent p^(1/3)-attack on the supersingular isogeny problem:
+
+Benjamin Wesolowski, “[The supersingular isogeny problem in time and memory p^(1/3+o(1))](https://eprint.iacr.org/2026/1486).
+
 ## Programs
 
 ### `find_smooth_path.c`
