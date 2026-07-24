@@ -1,4 +1,4 @@
-**WARNING: The files in this repository were created with assistance from ChatGPT Sol 5.6. It is research/prototype software and may contain serious mathematical or implementation mistakes.**
+**WARNING: The files in this repository were created with assistance from ChatGPT Sol 5.6 (i.e. *vibecoded*). It is research/prototype software and may contain serious mathematical or implementation mistakes. Use at your own risk.**
 
 ## Programs
 
@@ -218,6 +218,10 @@ x_exponent y_exponent integer_coefficient
 The bracketed format stores one symmetric half of the modular polynomial; the
 swapped monomial is inserted automatically.
 
-If the data files are included in this repository, document their source and
-license. Otherwise, add a download or generation script and keep this section
-updated with exact instructions for obtaining them.
+# Acknowledgement
+
+The classical modular polynomials used by this software were obtained from Andrew V. Sutherland's [Modular Polynomials database](https://math.mit.edu/~drew/ClassicalModPolys.html).
+
+If you use these modular polynomials in your research, please cite:
+
+> Reinier Bröker, Kristin Lauter, and Andrew V. Sutherland, “Modular polynomials via isogeny volcanoes,” *Mathematics of Computation* 81 (2012), 1201–1231. [doi:10.1090/S0025-5718-2011-02508-1](https://doi.org/10.1090/S0025-5718-2011-02508-1).
