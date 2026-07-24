@@ -1,13 +1,3 @@
-# Smooth isogeny path tools over Fp2
-
-This repository contains two C programs for experimenting with supersingular
-isogeny graphs over the quadratic finite field \(\mathbf F_{p^2}\). Both use
-the [FLINT](https://flintlib.org/) library for finite-field and polynomial
-arithmetic.
-
-The programs are research software. They are not constant-time, and their
-randomness is not suitable for cryptographic key generation.
-
 ## Programs
 
 ### `random_walk.c`
@@ -199,18 +189,6 @@ assumed to be supersingular; the programs do not test this condition.
 - MPFR;
 - POSIX threads.
 
-On Debian or Ubuntu, the packaged dependencies can normally be installed
-with:
-
-```bash
-sudo apt update
-sudo apt install build-essential libflint-dev libgmp-dev libmpfr-dev
-```
-
-On a system without administrator access, install FLINT and its dependencies
-in a user-controlled prefix, then add the corresponding `include` and `lib`
-directories to the compiler command.
-
 ## Compilation
 
 ```bash
@@ -255,37 +233,3 @@ swapped monomial is inserted automatically.
 If the data files are included in this repository, document their source and
 license. Otherwise, add a download or generation script and keep this section
 updated with exact instructions for obtaining them.
-
-## Suggested repository layout
-
-```text
-.
-├── README_find_smooth_path.md
-├── .gitignore
-├── LICENSE
-├── find_smooth_path.c
-├── random_walk.c
-└── mod_pols/
-    ├── phi_j_2.txt
-    ├── phi_j_3.txt
-    └── ...
-```
-
-## Limitations
-
-- The code is intended for research and experimentation, not production
-  cryptography.
-- Neither implementation is constant-time.
-- The random generators are designed for reproducible graph experiments,
-  not cryptographic randomness.
-- Runtime and memory use of the finder can grow rapidly with \(B\), \(N\),
-  and the size of the explored isogeny balls.
-- Enabling rerandomization makes the search unbounded: it can continue until
-  a path is found or the process is interrupted.
-
-## License
-
-Add an explicit open-source license before publishing. The BSD 2-Clause and
-MIT licenses are natural permissive choices for a small research-code
-repository. Also verify that any modular-polynomial data included in the
-repository may be redistributed under compatible terms.
