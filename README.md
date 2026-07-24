@@ -2,7 +2,7 @@
 
 The development of this software, in particular the first two input modes below, was inspired by the recent p^(1/3)-attack on the supersingular isogeny problem:
 
-Benjamin Wesolowski, “[The supersingular isogeny problem in time and memory p^(1/3+o(1))](https://eprint.iacr.org/2026/1486).
+Benjamin Wesolowski, [The supersingular isogeny problem in time and memory p^(1/3+o(1))](https://eprint.iacr.org/2026/1486).
 
 ## Programs
 
