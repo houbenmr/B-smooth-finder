@@ -218,7 +218,7 @@ x_exponent y_exponent integer_coefficient
 The bracketed format stores one symmetric half of the modular polynomial; the
 swapped monomial is inserted automatically.
 
-# Acknowledgement
+### Acknowledgement
 
 The classical modular polynomials used by this software were obtained from Andrew V. Sutherland's [Modular Polynomials database](https://math.mit.edu/~drew/ClassicalModPolys.html).
 
