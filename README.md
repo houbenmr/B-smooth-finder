@@ -111,6 +111,41 @@ The finder exits with status 0 when it finds a path, status 2 when a bounded
 search terminates without finding one, and a nonzero error status for invalid
 input or missing data.
 
+### `ordered_prime_search.c`
+
+`ordered_prime_search.c` provides the same meet-in-the-middle functionality as `find_smooth_path.c`, but uses a prime-ordered enumeration instead of Dijkstra’s algorithm.
+
+For each ball, the program first generates all admissible non-backtracking 2-power extensions, followed by the 3-power extensions, then the 5-power extensions, and so on for every prime `ell <= B`. Endpoints belonging to the same prime-power layer are evaluated together. The two balls are processed alternately, and every newly discovered j-invariant is immediately checked against the other ball. This ordering produces larger multipoint-evaluation batches and removes the Dijkstra priority queue. The first intersection gives a valid degree-bounded path, but it is not necessarily the path of minimum total degree.
+
+If `--B` is omitted, the default smoothness bound is
+
+```text
+B = floor(N^(1/4)).
+```
+
+The current implementation supports `2 <= B <= 10000`. The modular-polynomial directory must contain the polynomial for every prime `ell <= B`.
+
+By default, the program chooses adaptively between Horner evaluation for small batches and FLINT’s product-tree multipoint evaluation for larger batches. The optional flag
+
+```bash
+--force-multipoint
+```
+
+forces every nonempty ball-enumeration batch, including singleton batches, to use multipoint evaluation. This is mainly useful for benchmarking; it may be slower for small batches because constructing the product tree has a fixed cost. The flag does not change the scalar evaluations used for automatic j-invariant generation or for constructing rerandomization walks.
+
+Example:
+
+```bash
+./ordered_prime_search \
+    --p 4294967311 \
+    --N 1290 \
+    --phi-dir mod_pols \
+    --threads 8 \
+    --force-multipoint
+```
+
+Here `B` defaults to `floor(1290^(1/4)) = 5`.
+
 ### `random_walk.c`
 
 Computes a random non-backtracking 2-isogeny walk starting at a supplied
