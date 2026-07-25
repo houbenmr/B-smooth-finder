@@ -18,7 +18,7 @@
  *   - fq for larger p values represented by fmpz.
  *
  * Canonical usage:
- *   ./ordered_prime_search_20260725_064545 [N [phi_directory]] [options]
+ *   ./ordered_prime_search [N [phi_directory]] [options]
  *
  * Options:
  *   --p p         field characteristic (default: 4294967311)
