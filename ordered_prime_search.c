@@ -1,11 +1,16 @@
 #define _POSIX_C_SOURCE 200809L
 
 /*
- * Interleaved meet-in-the-middle search between supersingular
- * j-invariants. With zero or one input j-invariant, the target is the
- * p-power Frobenius conjugate. Rerandomization defaults to enabled with zero
- * or one supplied j-invariant and disabled with two supplied j-invariants;
- * the default can be overridden explicitly.
+ * FLINT 3.1-compatible prime-ordered smooth-isogeny search between
+ * supersingular j-invariants.
+ * With zero or one input j-invariant, the target is the p-power Frobenius
+ * conjugate. In these modes, only the ball from j is stored and completely
+ * enumerated; its conjugate ball is represented implicitly, and collisions
+ * with it are tested only after enumeration finishes. With two supplied
+ * j-invariants, two balls are enumerated alternately and checked online.
+ * Rerandomization defaults to enabled with zero or one supplied j-invariant
+ * and disabled with two supplied j-invariants; the default can be overridden
+ * explicitly.
  *
  * Field: F_{p^2} = F_p[a]/(a^2 - q), where p is an arbitrary-size input
  * prime and q is a deterministic quadratic nonresidue modulo p. For
@@ -46,10 +51,10 @@
  *   --seed s      seed automatic j-generation with the 64-bit integer s
  *
  * Legacy positional forms remain accepted:
- *   ./ordered_prime_search_20260725_064545 p B N phi_directory [options]
- *   ./ordered_prime_search_20260725_064545 p j1_re j1_im B N \
+ *   ./ordered_prime_search p B N phi_directory [options]
+ *   ./ordered_prime_search p j1_re j1_im B N \
  *       phi_directory [options]
- *   ./ordered_prime_search_20260725_064545 p j1_re j1_im j2_re j2_im B N \
+ *   ./ordered_prime_search p j1_re j1_im j2_re j2_im B N \
  *       phi_directory [options]
  *
  * In automatic mode, p must be 3 modulo 4, so j = 1728 is supersingular.
@@ -68,27 +73,32 @@
  * The bracketed format stores one symmetric half; the swapped monomial is
  * inserted automatically. Coefficients may be arbitrary signed integers.
  *
- * Compile with FLINT 3.x:
+ * Compile with FLINT 3.1:
  *   gcc -O3 -march=native -DNDEBUG -std=gnu11 -Wall -Wextra \
  *       -Wno-unused-parameter \
- *       ordered_prime_search_20260725_064545.c \
- *       -pthread -lflint -lmpfr -lgmp \
- *       -o ordered_prime_search_20260725_064545
+ *       ordered_prime_search.c \
+ *       -pthread -lflint -lmpfr -lgmp -lm \
+ *       -o ordered_prime_search
  *
  * Performance design:
  *   - Every Phi_ell is read exactly once. Its coefficient polynomials in X
  *     are reduced modulo p and retained as fq_nmod_poly or fq_poly objects.
- *   - The balls are enumerated in canonical prime-factor order. First all
- *     admissible non-backtracking 2-power extensions are generated, then
- *     all 3-power extensions of every existing endpoint, and so on through
- *     the primes ell <= B. This represents each smooth cyclic degree in one
- *     fixed prime order and removes the Dijkstra heap.
+ *   - The balls are enumerated in descending canonical prime-factor order.
+ *     Expensive high-degree Phi_ell root extractions therefore run while
+ *     the frontier is still small; the larger later frontiers use cheaper
+ *     low-degree modular polynomials. Coprime isogeny diamonds allow the
+ *     prime factors of every smooth cyclic path to be placed in this fixed
+ *     order without changing its endpoint or total degree.
  *   - At an ell-stage, endpoints of different current degrees are evaluated
  *     together with the same Phi_ell, subject to the individual condition
  *     degree*ell <= floor(sqrt(N)). Consecutive ell-power layers remain
  *     sequential because one layer supplies the points for the next.
- *   - The two balls alternate after every batch. Newly discovered vertices
- *     are checked immediately against the other ball.
+ *   - In the zero- and one-j modes, one complete ball is enumerated from j.
+ *     A post-enumeration scan looks for x and x^p in that same graph; this is
+ *     exactly an intersection with the implicit conjugate ball.
+ *   - In the two-j mode, the two explicit balls alternate after every batch.
+ *     Newly discovered vertices are checked immediately against the other
+ *     ball.
  *   - By default, a complete eligible ell-layer forms one batch. The
  *     optional --multipoint-batch n cap trades batching efficiency for
  *     lower temporary memory and more frequent intersection checks.
@@ -98,6 +108,10 @@
  *   - FLINT's worker pool evaluates independent coefficient polynomials and
  *     factors independent specializations in parallel. Graph updates remain
  *     serial, so the shortest-path state needs no locks.
+ *   - When the current path arrived by an ell-isogeny, the known dual root
+ *     is divided out before root extraction. Linear and quadratic residual
+ *     polynomials are solved directly; higher degrees use FLINT's split-root
+ *     routine.
  *   - The first intersection is a valid degree-bounded path, but prime-major
  *     order does not promise that it has minimum total degree.
  *   - If j is omitted, it is generated once by a random non-backtracking
@@ -186,6 +200,8 @@ typedef struct {
         } big;
     } value;
 } jkey_t;
+
+static void frobenius_conjugate(jkey_t *result, const jkey_t *j);
 
 /* Phi(X,Y) = sum_y coefficient_x[y](X) Y^y. */
 typedef struct {
@@ -827,7 +843,7 @@ static void find_roots_task_word(slong task_index, void *argument)
 {
     word_root_tasks_t *tasks = argument;
     fq_nmod_poly_factor_t roots;
-    fq_nmod_t constant, root;
+    fq_nmod_t a, b, c, discriminant, square_root, denominator, inverse, root;
     nmod_poly_t representative;
     size_t first = tasks->count * (size_t)task_index / tasks->task_count;
     size_t last = tasks->count * ((size_t)task_index + 1) /
@@ -835,27 +851,79 @@ static void find_roots_task_word(slong task_index, void *argument)
     size_t i;
 
     fq_nmod_poly_factor_init(roots, tasks->ctx);
-    fq_nmod_init(constant, tasks->ctx);
+    fq_nmod_init(a, tasks->ctx);
+    fq_nmod_init(b, tasks->ctx);
+    fq_nmod_init(c, tasks->ctx);
+    fq_nmod_init(discriminant, tasks->ctx);
+    fq_nmod_init(square_root, tasks->ctx);
+    fq_nmod_init(denominator, tasks->ctx);
+    fq_nmod_init(inverse, tasks->ctx);
     fq_nmod_init(root, tasks->ctx);
     nmod_poly_init(representative, field_characteristic_word);
 
     for (i = first; i < last; i++) {
-        slong factor_index;
+        slong degree =
+            fq_nmod_poly_degree(tasks->evaluated + i, tasks->ctx);
         size_t count = 0;
+        int handled = 0;
         jkey_t *point_roots = tasks->root_keys + i * tasks->root_stride;
 
-        fq_nmod_poly_roots(roots, tasks->evaluated + i, 0, tasks->ctx);
-        for (factor_index = 0; factor_index < roots->num; factor_index++) {
-            if (fq_nmod_poly_degree(roots->poly + factor_index,
-                                    tasks->ctx) != 1)
-                continue;
-            if (count == tasks->root_stride)
-                break;
-            fq_nmod_poly_get_coeff(constant, roots->poly + factor_index, 0,
-                                   tasks->ctx);
-            fq_nmod_neg(root, constant, tasks->ctx);
+        if (degree == 1) {
+            fq_nmod_poly_get_coeff(c, tasks->evaluated + i, 0, tasks->ctx);
+            fq_nmod_poly_get_coeff(a, tasks->evaluated + i, 1, tasks->ctx);
+            fq_nmod_inv(inverse, a, tasks->ctx);
+            fq_nmod_neg(root, c, tasks->ctx);
+            fq_nmod_mul(root, root, inverse, tasks->ctx);
             fq_nmod_to_key(point_roots + count++, root, representative,
                            tasks->ctx);
+            handled = 1;
+        } else if (degree == 2) {
+            fq_nmod_poly_get_coeff(c, tasks->evaluated + i, 0, tasks->ctx);
+            fq_nmod_poly_get_coeff(b, tasks->evaluated + i, 1, tasks->ctx);
+            fq_nmod_poly_get_coeff(a, tasks->evaluated + i, 2, tasks->ctx);
+            fq_nmod_mul(discriminant, b, b, tasks->ctx);
+            fq_nmod_mul(denominator, a, c, tasks->ctx);
+            fq_nmod_add(denominator, denominator, denominator, tasks->ctx);
+            fq_nmod_add(denominator, denominator, denominator, tasks->ctx);
+            fq_nmod_sub(discriminant, discriminant, denominator, tasks->ctx);
+            if (fq_nmod_sqrt(square_root, discriminant, tasks->ctx)) {
+                fq_nmod_add(denominator, a, a, tasks->ctx);
+                fq_nmod_inv(inverse, denominator, tasks->ctx);
+                fq_nmod_neg(b, b, tasks->ctx);
+                fq_nmod_add(root, b, square_root, tasks->ctx);
+                fq_nmod_mul(root, root, inverse, tasks->ctx);
+                fq_nmod_to_key(point_roots + count++, root, representative,
+                               tasks->ctx);
+                if (!fq_nmod_is_zero(square_root, tasks->ctx)) {
+                    fq_nmod_sub(root, b, square_root, tasks->ctx);
+                    fq_nmod_mul(root, root, inverse, tasks->ctx);
+                    fq_nmod_to_key(point_roots + count++, root,
+                                   representative, tasks->ctx);
+                }
+                handled = 1;
+            }
+        }
+        if (!handled) {
+            slong factor_index;
+
+            fq_nmod_poly_roots(roots, tasks->evaluated + i, 0, tasks->ctx);
+            for (factor_index = 0; factor_index < roots->num;
+                 factor_index++) {
+                if (fq_nmod_poly_degree(roots->poly + factor_index,
+                                        tasks->ctx) != 1)
+                    continue;
+                if (count == tasks->root_stride)
+                    break;
+                fq_nmod_poly_get_coeff(c, roots->poly + factor_index, 0,
+                                       tasks->ctx);
+                fq_nmod_poly_get_coeff(a, roots->poly + factor_index, 1,
+                                       tasks->ctx);
+                fq_nmod_inv(inverse, a, tasks->ctx);
+                fq_nmod_neg(root, c, tasks->ctx);
+                fq_nmod_mul(root, root, inverse, tasks->ctx);
+                fq_nmod_to_key(point_roots + count++, root, representative,
+                               tasks->ctx);
+            }
         }
         qsort(point_roots, count, sizeof(*point_roots), compare_keys);
         tasks->root_counts[i] = count;
@@ -863,7 +931,13 @@ static void find_roots_task_word(slong task_index, void *argument)
 
     nmod_poly_clear(representative);
     fq_nmod_clear(root, tasks->ctx);
-    fq_nmod_clear(constant, tasks->ctx);
+    fq_nmod_clear(inverse, tasks->ctx);
+    fq_nmod_clear(denominator, tasks->ctx);
+    fq_nmod_clear(square_root, tasks->ctx);
+    fq_nmod_clear(discriminant, tasks->ctx);
+    fq_nmod_clear(c, tasks->ctx);
+    fq_nmod_clear(b, tasks->ctx);
+    fq_nmod_clear(a, tasks->ctx);
     fq_nmod_poly_factor_clear(roots, tasks->ctx);
 }
 
@@ -999,7 +1073,7 @@ static void find_roots_task_big(slong task_index, void *argument)
 {
     big_root_tasks_t *tasks = argument;
     fq_poly_factor_t roots;
-    fq_t constant, root;
+    fq_t a, b, c, discriminant, square_root, denominator, inverse, root;
     fmpz_poly_t representative;
     size_t first = tasks->count * (size_t)task_index / tasks->task_count;
     size_t last = tasks->count * ((size_t)task_index + 1) /
@@ -1007,27 +1081,78 @@ static void find_roots_task_big(slong task_index, void *argument)
     size_t i;
 
     fq_poly_factor_init(roots, tasks->ctx);
-    fq_init(constant, tasks->ctx);
+    fq_init(a, tasks->ctx);
+    fq_init(b, tasks->ctx);
+    fq_init(c, tasks->ctx);
+    fq_init(discriminant, tasks->ctx);
+    fq_init(square_root, tasks->ctx);
+    fq_init(denominator, tasks->ctx);
+    fq_init(inverse, tasks->ctx);
     fq_init(root, tasks->ctx);
     fmpz_poly_init(representative);
 
     for (i = first; i < last; i++) {
-        slong factor_index;
+        slong degree = fq_poly_degree(tasks->evaluated + i, tasks->ctx);
         size_t count = 0;
+        int handled = 0;
         jkey_t *point_roots = tasks->root_keys + i * tasks->root_stride;
 
-        fq_poly_roots(roots, tasks->evaluated + i, 0, tasks->ctx);
-        for (factor_index = 0; factor_index < roots->num; factor_index++) {
-            if (fq_poly_degree(roots->poly + factor_index,
-                               tasks->ctx) != 1)
-                continue;
-            if (count == tasks->root_stride)
-                break;
-            fq_poly_get_coeff(constant, roots->poly + factor_index, 0,
-                              tasks->ctx);
-            fq_neg(root, constant, tasks->ctx);
+        if (degree == 1) {
+            fq_poly_get_coeff(c, tasks->evaluated + i, 0, tasks->ctx);
+            fq_poly_get_coeff(a, tasks->evaluated + i, 1, tasks->ctx);
+            fq_inv(inverse, a, tasks->ctx);
+            fq_neg(root, c, tasks->ctx);
+            fq_mul(root, root, inverse, tasks->ctx);
             fq_to_key(point_roots + count++, root, representative,
                       tasks->ctx);
+            handled = 1;
+        } else if (degree == 2) {
+            fq_poly_get_coeff(c, tasks->evaluated + i, 0, tasks->ctx);
+            fq_poly_get_coeff(b, tasks->evaluated + i, 1, tasks->ctx);
+            fq_poly_get_coeff(a, tasks->evaluated + i, 2, tasks->ctx);
+            fq_mul(discriminant, b, b, tasks->ctx);
+            fq_mul(denominator, a, c, tasks->ctx);
+            fq_add(denominator, denominator, denominator, tasks->ctx);
+            fq_add(denominator, denominator, denominator, tasks->ctx);
+            fq_sub(discriminant, discriminant, denominator, tasks->ctx);
+            if (fq_sqrt(square_root, discriminant, tasks->ctx)) {
+                fq_add(denominator, a, a, tasks->ctx);
+                fq_inv(inverse, denominator, tasks->ctx);
+                fq_neg(b, b, tasks->ctx);
+                fq_add(root, b, square_root, tasks->ctx);
+                fq_mul(root, root, inverse, tasks->ctx);
+                fq_to_key(point_roots + count++, root, representative,
+                          tasks->ctx);
+                if (!fq_is_zero(square_root, tasks->ctx)) {
+                    fq_sub(root, b, square_root, tasks->ctx);
+                    fq_mul(root, root, inverse, tasks->ctx);
+                    fq_to_key(point_roots + count++, root, representative,
+                              tasks->ctx);
+                }
+                handled = 1;
+            }
+        }
+        if (!handled) {
+            slong factor_index;
+
+            fq_poly_roots(roots, tasks->evaluated + i, 0, tasks->ctx);
+            for (factor_index = 0; factor_index < roots->num;
+                 factor_index++) {
+                if (fq_poly_degree(roots->poly + factor_index,
+                                   tasks->ctx) != 1)
+                    continue;
+                if (count == tasks->root_stride)
+                    break;
+                fq_poly_get_coeff(c, roots->poly + factor_index, 0,
+                                  tasks->ctx);
+                fq_poly_get_coeff(a, roots->poly + factor_index, 1,
+                                  tasks->ctx);
+                fq_inv(inverse, a, tasks->ctx);
+                fq_neg(root, c, tasks->ctx);
+                fq_mul(root, root, inverse, tasks->ctx);
+                fq_to_key(point_roots + count++, root, representative,
+                          tasks->ctx);
+            }
         }
         qsort(point_roots, count, sizeof(*point_roots), compare_keys);
         tasks->root_counts[i] = count;
@@ -1035,8 +1160,76 @@ static void find_roots_task_big(slong task_index, void *argument)
 
     fmpz_poly_clear(representative);
     fq_clear(root, tasks->ctx);
-    fq_clear(constant, tasks->ctx);
+    fq_clear(inverse, tasks->ctx);
+    fq_clear(denominator, tasks->ctx);
+    fq_clear(square_root, tasks->ctx);
+    fq_clear(discriminant, tasks->ctx);
+    fq_clear(c, tasks->ctx);
+    fq_clear(b, tasks->ctx);
+    fq_clear(a, tasks->ctx);
     fq_poly_factor_clear(roots, tasks->ctx);
+}
+
+/*
+ * Synthetic division by Y - known_root. The quotient and remainder scratch
+ * objects are reused across the whole batch, avoiding a FLINT allocation for
+ * every known dual edge.
+ */
+static int divide_out_known_root_word(
+    fq_nmod_poly_t polynomial, fq_nmod_poly_t quotient,
+    const fq_nmod_t known_root, fq_nmod_t remainder,
+    const fq_nmod_ctx_t ctx)
+{
+    slong degree = fq_nmod_poly_degree(polynomial, ctx);
+    slong k;
+
+    if (degree < 1)
+        return 0;
+    fq_nmod_poly_fit_length(quotient, degree, ctx);
+    fq_nmod_set(quotient->coeffs + degree - 1,
+                polynomial->coeffs + degree, ctx);
+    for (k = degree - 1; k > 0; k--) {
+        fq_nmod_mul(quotient->coeffs + k - 1, quotient->coeffs + k,
+                    known_root, ctx);
+        fq_nmod_add(quotient->coeffs + k - 1,
+                    quotient->coeffs + k - 1,
+                    polynomial->coeffs + k, ctx);
+    }
+    _fq_nmod_poly_set_length(quotient, degree, ctx);
+    fq_nmod_mul(remainder, quotient->coeffs, known_root, ctx);
+    fq_nmod_add(remainder, remainder, polynomial->coeffs, ctx);
+    if (!fq_nmod_is_zero(remainder, ctx))
+        return 0;
+    fq_nmod_poly_swap(polynomial, quotient, ctx);
+    return 1;
+}
+
+static int divide_out_known_root_big(
+    fq_poly_t polynomial, fq_poly_t quotient, const fq_t known_root,
+    fq_t remainder, const fq_ctx_t ctx)
+{
+    slong degree = fq_poly_degree(polynomial, ctx);
+    slong k;
+
+    if (degree < 1)
+        return 0;
+    fq_poly_fit_length(quotient, degree, ctx);
+    fq_set(quotient->coeffs + degree - 1,
+           polynomial->coeffs + degree, ctx);
+    for (k = degree - 1; k > 0; k--) {
+        fq_mul(quotient->coeffs + k - 1, quotient->coeffs + k,
+               known_root, ctx);
+        fq_add(quotient->coeffs + k - 1,
+               quotient->coeffs + k - 1,
+               polynomial->coeffs + k, ctx);
+    }
+    _fq_poly_set_length(quotient, degree, ctx);
+    fq_mul(remainder, quotient->coeffs, known_root, ctx);
+    fq_add(remainder, remainder, polynomial->coeffs, ctx);
+    if (!fq_is_zero(remainder, ctx))
+        return 0;
+    fq_poly_swap(polynomial, quotient, ctx);
+    return 1;
 }
 
 static size_t modular_poly_edges_at_big(
@@ -2196,6 +2389,32 @@ static int process_ordered_batch_word(
                       &specialization_tasks, (slong)count,
                       (int)n_threads, FLINT_PARALLEL_UNIFORM);
 
+    {
+        fq_nmod_poly_t quotient;
+        fq_nmod_t known_root, remainder;
+
+        fq_nmod_poly_init(quotient, ctx);
+        fq_nmod_init(known_root, ctx);
+        fq_nmod_init(remainder, ctx);
+        for (i = 0; i < count; i++) {
+            const search_node_t *current = graph->nodes + frontier[i];
+
+            if (current->parent == NO_INDEX ||
+                current->parent_ell != phi->ell)
+                continue;
+            key_to_fq_nmod(known_root,
+                           graph->nodes[current->parent].key,
+                           representative, ctx);
+            if (!divide_out_known_root_word(
+                    evaluated + i, quotient, known_root, remainder, ctx))
+                die("known dual isogeny is not a root of the specialization");
+            ball->stats.skipped_backtracks++;
+        }
+        fq_nmod_clear(remainder, ctx);
+        fq_nmod_clear(known_root, ctx);
+        fq_nmod_poly_clear(quotient, ctx);
+    }
+
     ball->stats.specializations += (uint64_t)count;
     ball->stats.root_finds += (uint64_t)count;
     ball->expanded_states += count;
@@ -2239,12 +2458,14 @@ static int process_ordered_batch_word(
                                     frontier[i], phi->ell, &index))
                 continue;
             index_vector_append(next_frontier, index);
-            match = graph_find(other, graph->nodes[index].key);
-            if (match != NO_INDEX) {
-                *this_meet = index;
-                *other_meet = match;
-                found = 1;
-                break;
+            if (other != NULL) {
+                match = graph_find(other, graph->nodes[index].key);
+                if (match != NO_INDEX) {
+                    *this_meet = index;
+                    *other_meet = match;
+                    found = 1;
+                    break;
+                }
             }
         }
     }
@@ -2358,6 +2579,31 @@ static int process_ordered_batch_big(
                       &specialization_tasks, (slong)count,
                       (int)n_threads, FLINT_PARALLEL_UNIFORM);
 
+    {
+        fq_poly_t quotient;
+        fq_t known_root, remainder;
+
+        fq_poly_init(quotient, ctx);
+        fq_init(known_root, ctx);
+        fq_init(remainder, ctx);
+        for (i = 0; i < count; i++) {
+            const search_node_t *current = graph->nodes + frontier[i];
+
+            if (current->parent == NO_INDEX ||
+                current->parent_ell != phi->ell)
+                continue;
+            key_to_fq(known_root, graph->nodes[current->parent].key,
+                      representative, ctx);
+            if (!divide_out_known_root_big(
+                    evaluated + i, quotient, known_root, remainder, ctx))
+                die("known dual isogeny is not a root of the specialization");
+            ball->stats.skipped_backtracks++;
+        }
+        fq_clear(remainder, ctx);
+        fq_clear(known_root, ctx);
+        fq_poly_clear(quotient, ctx);
+    }
+
     ball->stats.specializations += (uint64_t)count;
     ball->stats.root_finds += (uint64_t)count;
     ball->expanded_states += count;
@@ -2401,12 +2647,14 @@ static int process_ordered_batch_big(
                                     frontier[i], phi->ell, &index))
                 continue;
             index_vector_append(next_frontier, index);
-            match = graph_find(other, graph->nodes[index].key);
-            if (match != NO_INDEX) {
-                *this_meet = index;
-                *other_meet = match;
-                found = 1;
-                break;
+            if (other != NULL) {
+                match = graph_find(other, graph->nodes[index].key);
+                if (match != NO_INDEX) {
+                    *this_meet = index;
+                    *other_meet = match;
+                    found = 1;
+                    break;
+                }
             }
         }
     }
@@ -2459,7 +2707,8 @@ static size_t ordered_batch_count(size_t remaining)
 
 /*
  * Generate all canonical ell-power extensions of the endpoints produced by
- * smaller primes. Both balls advance one batch at a time. The k-th wave
+ * already processed larger primes. Both balls advance one batch at a time.
+ * The k-th wave
  * depends on the (k-1)-st, but sources of different current degrees in one
  * wave share a single Phi_ell multipoint tree.
  */
@@ -2567,6 +2816,70 @@ cleanup:
     return found;
 }
 
+/*
+ * Enumerate one complete prime stage without testing intersections. This is
+ * used by Frobenius mode, where the second ball is represented implicitly by
+ * conjugating the completed first ball.
+ */
+static void ordered_expand_prime_stage_single(
+    ordered_ball_t *ball, const fmpz_t radius,
+    const modular_poly_t *phi, const field_context_t *field,
+    unsigned n_threads, const atomic_int *cancel_requested,
+    int *cancelled_out)
+{
+    index_vector_t current = {0}, next = {0};
+
+    index_vector_fill_graph(&current, ball->graph);
+    while (current.length != 0) {
+        size_t offset = 0;
+
+        index_vector_filter_eligible(
+            &current, ball->graph, phi->ell, radius);
+        if (current.length == 0)
+            break;
+        next.length = 0;
+
+        while (offset < current.length) {
+            size_t count;
+            double started;
+            int unexpected_intersection;
+
+            if (cancel_requested != NULL &&
+                atomic_load_explicit(cancel_requested,
+                                     memory_order_relaxed)) {
+                if (cancelled_out != NULL)
+                    *cancelled_out = 1;
+                goto cleanup;
+            }
+            count = ordered_batch_count(current.length - offset);
+            started = wall_seconds();
+            unexpected_intersection = process_ordered_batch(
+                ball, current.items + offset, count, radius, phi,
+                field, n_threads, NULL, &next, NULL, NULL,
+                cancel_requested, cancelled_out);
+            ball->active_seconds += wall_seconds() - started;
+            if (unexpected_intersection)
+                die("internal error: intersection in one-ball enumeration");
+            offset += count;
+            if (cancelled_out != NULL && *cancelled_out)
+                goto cleanup;
+        }
+
+        index_vector_sort_unique(&next);
+        {
+            index_vector_t temporary = current;
+
+            current = next;
+            next = temporary;
+            next.length = 0;
+        }
+    }
+
+cleanup:
+    index_vector_clear(&next);
+    index_vector_clear(&current);
+}
+
 static void ordered_ball_report(const ordered_ball_t *ball,
                                 int stopped_early)
 {
@@ -2622,7 +2935,8 @@ static int ordered_search_between(
     if (report) {
         fprintf(stderr, "Search radius floor(sqrt(bound)) = ");
         fmpz_fprint(stderr, radius);
-        fprintf(stderr, "\nEnumeration order = canonical prime blocks");
+        fprintf(stderr,
+                "\nEnumeration order = descending canonical prime blocks");
         if (ordered_multipoint_batch_limit == 0)
             fprintf(stderr,
                     "; multipoint batch cap = unlimited "
@@ -2643,9 +2957,9 @@ static int ordered_search_between(
         found = 1;
     }
 
-    for (polynomial_index = 0;
-         polynomial_index < n_polynomials && !found;
-         polynomial_index++) {
+    polynomial_index = n_polynomials;
+    while (polynomial_index > 0 && !found) {
+        polynomial_index--;
         if (report)
             fprintf(stderr, "Prime stage ell = %u\n",
                     polynomials[polynomial_index].ell);
@@ -2678,6 +2992,132 @@ static int ordered_search_between(
     return found;
 }
 
+/*
+ * Enumerate the full ball from start, then intersect it with its implicit
+ * Frobenius conjugate. If x^p is also in the stored ball, the path to x and
+ * the conjugate of the path to x^p join to give a path from start to start^p.
+ */
+static int ordered_search_frobenius(
+    search_graph_t *graph, jkey_t start, const fmpz_t degree_bound,
+    const modular_poly_t *polynomials, size_t n_polynomials,
+    const field_context_t *field, unsigned n_threads, const char *label,
+    size_t *left_meet, size_t *conjugate_meet, fmpz_t path_degree,
+    int report, const atomic_int *cancel_requested, int *cancelled_out)
+{
+    ordered_ball_t ball;
+    fmpz_t radius, one, left_degree, conjugate_degree;
+    fmpz_t candidate_degree, best_degree;
+    jkey_t conjugate;
+    size_t polynomial_index, index;
+    int found = 0;
+
+    memset(&ball, 0, sizeof(ball));
+    ball.graph = graph;
+    ball.label = label;
+    if (cancelled_out != NULL)
+        *cancelled_out = 0;
+
+    fmpz_init(radius);
+    fmpz_init(one);
+    fmpz_init(left_degree);
+    fmpz_init(conjugate_degree);
+    fmpz_init(candidate_degree);
+    fmpz_init(best_degree);
+    key_init(&conjugate);
+    fmpz_sqrt(radius, degree_bound);
+    fmpz_one(one);
+    graph_init(graph);
+    graph_add(graph, start, one, NO_INDEX, 0);
+
+    if (report) {
+        fprintf(stderr, "Search radius floor(sqrt(bound)) = ");
+        fmpz_fprint(stderr, radius);
+        fprintf(stderr,
+                "\nFrobenius mode = one explicit ball; "
+                "collision scan after complete enumeration\n"
+                "Enumeration order = descending canonical prime blocks");
+        if (ordered_multipoint_batch_limit == 0)
+            fprintf(stderr,
+                    "; multipoint batch cap = unlimited "
+                    "(one complete eligible layer)\n");
+        else
+            fprintf(stderr, "; multipoint batch cap = %lu\n",
+                    (unsigned long)ordered_multipoint_batch_limit);
+        fprintf(stderr, "Ordered-search evaluation policy = %s\n",
+                ordered_force_multipoint
+                    ? "multipoint only (forced for every nonempty batch)"
+                    : "adaptive Horner/multipoint crossover");
+    }
+
+    polynomial_index = n_polynomials;
+    while (polynomial_index > 0) {
+        polynomial_index--;
+        if (report)
+            fprintf(stderr, "Prime stage ell = %u\n",
+                    polynomials[polynomial_index].ell);
+        ordered_expand_prime_stage_single(
+            &ball, radius, polynomials + polynomial_index, field,
+            n_threads, cancel_requested, cancelled_out);
+        if (cancelled_out != NULL && *cancelled_out)
+            break;
+    }
+
+    if (cancelled_out == NULL || !*cancelled_out) {
+        /*
+         * Scan only now: the complete explicit ball is already available.
+         * Keep the collision with the smallest product of stored degrees.
+         */
+        for (index = 0; index < graph->length; index++) {
+            size_t match;
+
+            frobenius_conjugate(&conjugate, &graph->nodes[index].key);
+            match = graph_find(graph, conjugate);
+            if (match == NO_INDEX)
+                continue;
+            fmpz_mul(candidate_degree, graph->nodes[index].degree,
+                     graph->nodes[match].degree);
+            if (fmpz_cmp(candidate_degree, degree_bound) > 0)
+                continue;
+            if (!found || fmpz_cmp(candidate_degree, best_degree) < 0) {
+                *left_meet = index;
+                *conjugate_meet = match;
+                fmpz_set(best_degree, candidate_degree);
+                found = 1;
+            }
+        }
+    }
+
+    if (found) {
+        graph_chain_degree(left_degree, graph, *left_meet);
+        graph_chain_degree(conjugate_degree, graph, *conjugate_meet);
+        if (fmpz_cmp(left_degree, radius) > 0 ||
+            fmpz_cmp(conjugate_degree, radius) > 0)
+            die("internal error: Frobenius collision exceeds search radius");
+        fmpz_mul(path_degree, left_degree, conjugate_degree);
+        if (fmpz_cmp(path_degree, degree_bound) > 0)
+            die("internal error: Frobenius path exceeds degree bound");
+    }
+
+    if (report) {
+        ordered_ball_report(&ball, 0);
+        fprintf(stderr,
+                "Implicit conjugate ball: %lu j-invariants "
+                "(not stored separately)\n",
+                (unsigned long)graph->length);
+        fprintf(stderr, "Post-enumeration Frobenius collision scan: %s\n",
+                found ? "intersection found" : "no intersection");
+    }
+
+    key_clear(&conjugate);
+    fmpz_clear(best_degree);
+    fmpz_clear(candidate_degree);
+    fmpz_clear(conjugate_degree);
+    fmpz_clear(left_degree);
+    fmpz_clear(one);
+    fmpz_clear(radius);
+    return found;
+}
+
 typedef struct {
     search_graph_t left, right;
     jkey_t start, target;
@@ -2695,6 +3135,7 @@ typedef struct {
     atomic_int *cancel_requested;
     atomic_int *winner_slot;
     int slot;
+    int single_ball_frobenius;
     int found;
     int cancelled;
     double elapsed_seconds;
@@ -2705,12 +3146,20 @@ static void *run_rerandomization_search(void *argument)
     rerandomization_search_job_t *job = argument;
     double started = wall_seconds();
 
-    job->found = ordered_search_between(
-        &job->left, &job->right, job->start, job->target,
-        job->degree_bound, job->polynomials, job->n_polynomials,
-        job->field, job->search_threads, "j'", job->right_label,
-        &job->left_meet, &job->right_meet, job->path_degree, 0,
-        job->cancel_requested, &job->cancelled);
+    if (job->single_ball_frobenius)
+        job->found = ordered_search_frobenius(
+            &job->left, job->start, job->degree_bound,
+            job->polynomials, job->n_polynomials, job->field,
+            job->search_threads, "j'", &job->left_meet,
+            &job->right_meet, job->path_degree, 0,
+            job->cancel_requested, &job->cancelled);
+    else
+        job->found = ordered_search_between(
+            &job->left, &job->right, job->start, job->target,
+            job->degree_bound, job->polynomials, job->n_polynomials,
+            job->field, job->search_threads, "j'", job->right_label,
+            &job->left_meet, &job->right_meet, job->path_degree, 0,
+            job->cancel_requested, &job->cancelled);
     job->elapsed_seconds = wall_seconds() - started;
 
     if (job->found) {
@@ -2774,6 +3223,59 @@ static void print_path(const search_graph_t *left, size_t left_meet,
     free(reverse_path);
 }
 
+static void print_frobenius_path(
+    const search_graph_t *graph, size_t left_meet,
+    size_t conjugate_meet, const fmpz_t total_degree)
+{
+    size_t *reverse_path = NULL;
+    size_t length = 0, conjugate_length = 0, alloc = 0, i, current;
+    jkey_t conjugate;
+
+    current = left_meet;
+    while (current != NO_INDEX) {
+        if (length == alloc) {
+            alloc = alloc ? 2 * alloc : 16;
+            reverse_path = xrealloc(reverse_path, alloc,
+                                    sizeof(*reverse_path));
+        }
+        reverse_path[length++] = current;
+        current = graph->nodes[current].parent;
+    }
+
+    current = conjugate_meet;
+    while (graph->nodes[current].parent != NO_INDEX) {
+        conjugate_length++;
+        current = graph->nodes[current].parent;
+    }
+
+    printf("Path found. Total degree = ");
+    fmpz_print(total_degree);
+    printf("\nNumber of steps = %lu\n\n",
+           (unsigned long)(length - 1 + conjugate_length));
+
+    print_key(graph->nodes[reverse_path[length - 1]].key);
+    printf("\n");
+    for (i = length - 1; i > 0; i--) {
+        const search_node_t *child = graph->nodes + reverse_path[i - 1];
+
+        printf("  --[%u]--> ", child->parent_ell);
+        print_key(child->key);
+        printf("\n");
+    }
+
+    key_init(&conjugate);
+    current = conjugate_meet;
+    while (graph->nodes[current].parent != NO_INDEX) {
+        printf("  --[%u]--> ", graph->nodes[current].parent_ell);
+        current = graph->nodes[current].parent;
+        frobenius_conjugate(&conjugate, &graph->nodes[current].key);
+        print_key(conjugate);
+        printf("\n");
+    }
+    key_clear(&conjugate);
+    free(reverse_path);
+}
+
 static void print_rerandomized_path(const search_graph_t *left,
                                     size_t left_meet,
                                     const search_graph_t *right,
@@ -2782,6 +3284,7 @@ static void print_rerandomized_path(const search_graph_t *left,
                                     size_t walk_length,
                                     unsigned rerandomization_ell,
                                     const fmpz_t middle_degree,
+                                    int conjugate_middle_return,
                                     int append_frobenius_return)
 {
     size_t *reverse_path = NULL;
@@ -2842,11 +3345,26 @@ static void print_rerandomized_path(const search_graph_t *left,
     }
 
     current = right_meet;
-    while (right->nodes[current].parent != NO_INDEX) {
-        printf("  --[%u]--> ", right->nodes[current].parent_ell);
-        current = right->nodes[current].parent;
-        print_key(right->nodes[current].key);
-        printf("\n");
+    if (conjugate_middle_return) {
+        jkey_t conjugate;
+
+        key_init(&conjugate);
+        while (right->nodes[current].parent != NO_INDEX) {
+            printf("  --[%u]--> ", right->nodes[current].parent_ell);
+            current = right->nodes[current].parent;
+            frobenius_conjugate(
+                &conjugate, &right->nodes[current].key);
+            print_key(conjugate);
+            printf("\n");
+        }
+        key_clear(&conjugate);
+    } else {
+        while (right->nodes[current].parent != NO_INDEX) {
+            printf("  --[%u]--> ", right->nodes[current].parent_ell);
+            current = right->nodes[current].parent;
+            print_key(right->nodes[current].key);
+            printf("\n");
+        }
     }
     if (append_frobenius_return) {
         jkey_t conjugate;
@@ -3387,7 +3905,8 @@ int main(int argc, char **argv)
     search_graph_t left, right;
     fmpz_t N, path_degree, quadratic_nonresidue;
     size_t left_meet = 0, right_meet = 0;
-    int found, graphs_live = 0, attempted_rerandomization = 0;
+    int found, left_graph_live = 0, right_graph_live = 0;
+    int attempted_rerandomization = 0;
     int rerandomization_phi_loaded = 0;
     int automatic_j = 0, seed_supplied = 0, threads_supplied = 0;
     int multipoint_batch_supplied = 0, force_multipoint_supplied = 0;
@@ -3774,16 +4293,30 @@ int main(int argc, char **argv)
                                               : " [default]");
 
     initial_start = wall_seconds();
-    found = ordered_search_between(
-        &left, &right, j1, target, N,
-        polynomials, n_polynomials, &field, n_threads,
-        "j1", j_mode == 2 ? "j2" : "j1^p",
-        &left_meet, &right_meet, path_degree, 1, NULL, NULL);
-    graphs_live = 1;
+    if (j_mode == 2) {
+        found = ordered_search_between(
+            &left, &right, j1, target, N,
+            polynomials, n_polynomials, &field, n_threads,
+            "j1", "j2", &left_meet, &right_meet,
+            path_degree, 1, NULL, NULL);
+        left_graph_live = 1;
+        right_graph_live = 1;
+    } else {
+        found = ordered_search_frobenius(
+            &left, j1, N, polynomials, n_polynomials, &field,
+            n_threads, "j1", &left_meet, &right_meet,
+            path_degree, 1, NULL, NULL);
+        left_graph_live = 1;
+    }
     initial_end = wall_seconds();
 
     if (found) {
-        print_path(&left, left_meet, &right, right_meet, path_degree);
+        if (j_mode == 2)
+            print_path(
+                &left, left_meet, &right, right_meet, path_degree);
+        else
+            print_frobenius_path(
+                &left, left_meet, right_meet, path_degree);
     } else if (!allow_rerandomization) {
         printf("No B-smooth isogeny from j1 to %s of degree at most ",
                j_mode == 2 ? "j2" : "j1^p");
@@ -3809,9 +4342,14 @@ int main(int argc, char **argv)
         fmpz_fprint(stderr, N);
         fprintf(stderr, "\n");
 
-        graph_clear(&left);
-        graph_clear(&right);
-        graphs_live = 0;
+        if (left_graph_live) {
+            graph_clear(&left);
+            left_graph_live = 0;
+        }
+        if (right_graph_live) {
+            graph_clear(&right);
+            right_graph_live = 0;
+        }
 
         found = 0;
         for (;;) {
@@ -3897,6 +4435,7 @@ int main(int argc, char **argv)
                         rerandomization_jobs == 1 ? n_threads : 1;
                     job->right_label =
                         j_mode == 2 ? "j2" : "(j')^p";
+                    job->single_ball_frobenius = j_mode != 2;
                     job->cancel_requested = &cancel_requested;
                     job->winner_slot = &winner_slot;
                     job->slot = (int)job_index;
@@ -3957,13 +4496,23 @@ int main(int argc, char **argv)
                         status = "cancelled after another success";
                     else
                         status = "failed";
-                    fprintf(stderr,
-                            "Rerandomization attempt %lu %s in "
-                            "%.3f s (left ball %lu, right ball %lu)\n",
-                            (unsigned long)job->attempt_number,
-                            status, job->elapsed_seconds,
-                            (unsigned long)job->left.length,
-                            (unsigned long)job->right.length);
+                    if (job->single_ball_frobenius)
+                        fprintf(stderr,
+                                "Rerandomization attempt %lu %s in "
+                                "%.3f s (one explicit ball %lu; "
+                                "conjugate ball implicit)\n",
+                                (unsigned long)job->attempt_number,
+                                status, job->elapsed_seconds,
+                                (unsigned long)job->left.length);
+                    else
+                        fprintf(stderr,
+                                "Rerandomization attempt %lu %s in "
+                                "%.3f s (left ball %lu, "
+                                "right ball %lu)\n",
+                                (unsigned long)job->attempt_number,
+                                status, job->elapsed_seconds,
+                                (unsigned long)job->left.length,
+                                (unsigned long)job->right.length);
                 }
 
                 if (winner >= 0) {
@@ -3975,12 +4524,15 @@ int main(int argc, char **argv)
                     successful_attempt_number =
                         winning_job->attempt_number;
                     left = winning_job->left;
-                    right = winning_job->right;
+                    left_graph_live = 1;
+                    if (!winning_job->single_ball_frobenius) {
+                        right = winning_job->right;
+                        right_graph_live = 1;
+                    }
                     left_meet = winning_job->left_meet;
                     right_meet = winning_job->right_meet;
                     fmpz_set(path_degree,
                              winning_job->path_degree);
-                    graphs_live = 1;
                 }
 
                 for (job_index = 0; job_index < batch_count;
@@ -3990,7 +4542,8 @@ int main(int argc, char **argv)
 
                     if ((int)job_index != winner) {
                         graph_clear(&job->left);
-                        graph_clear(&job->right);
+                        if (!job->single_ball_frobenius)
+                            graph_clear(&job->right);
                     }
                     fmpz_clear(job->path_degree);
                     key_clear(&job->target);
@@ -4014,18 +4567,20 @@ int main(int argc, char **argv)
                (unsigned long)rerandomizations_attempted,
                rerandomizations_attempted == 1 ? "" : "s");
         print_rerandomized_path(
-            &left, left_meet, &right, right_meet, successful_walk,
+            &left, left_meet,
+            j_mode == 2 ? &right : &left, right_meet, successful_walk,
             successful_walk_length, rerandomization_ell, path_degree,
+            j_mode != 2,
             j_mode != 2);
     }
     fflush(stdout);
     output_end = wall_seconds();
 
     cleanup_start = wall_seconds();
-    if (graphs_live) {
+    if (left_graph_live)
         graph_clear(&left);
+    if (right_graph_live)
         graph_clear(&right);
-    }
     for (k = 0; k < n_polynomials; k++)
         modular_poly_clear(polynomials + k, &field);
     if (rerandomization_phi_loaded)
