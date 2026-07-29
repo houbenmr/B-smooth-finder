@@ -111,40 +111,152 @@ The finder exits with status 0 when it finds a path, status 2 when a bounded
 search terminates without finding one, and a nonzero error status for invalid
 input or missing data.
 
-### `ordered_prime_search.c`
+### `ordered_prime_search.c` and `ordered_prime_search_flint34.c`
 
-`ordered_prime_search.c` provides the same meet-in-the-middle functionality as `find_smooth_path.c`, but uses a prime-ordered enumeration instead of Dijkstra’s algorithm.
+These programs provide the same path-finding functionality as
+`find_smooth_path.c`, but replace Dijkstra's algorithm with a fixed
+prime-major enumeration.
 
-For each ball, the program first generates all admissible non-backtracking 2-power extensions, followed by the 3-power extensions, then the 5-power extensions, and so on for every prime `ell <= B`. Endpoints belonging to the same prime-power layer are evaluated together. The two balls are processed alternately, and every newly discovered j-invariant is immediately checked against the other ball. This ordering produces larger multipoint-evaluation batches and removes the Dijkstra priority queue. The first intersection gives a valid degree-bounded path, but it is not necessarily the path of minimum total degree.
+The modular polynomials are processed in descending prime order. For each
+prime `ell <= B`, the programs generate every admissible non-backtracking
+`ell`-power extension before proceeding to the next smaller prime. Thus,
+expensive high-degree modular polynomials are applied while the frontier is
+still relatively small, whereas the cheaper low-degree polynomials are
+applied to the larger later frontiers. Coprime isogeny diamonds allow the
+prime factors of a smooth cyclic path to be placed in this fixed order
+without changing its endpoint or total degree.
 
-If `--B` is omitted, the default smoothness bound is
+Endpoints in the same prime-power layer are evaluated together. This
+typically creates larger modular-polynomial evaluation batches and removes
+the Dijkstra priority queue. Consecutive powers of the same prime remain
+sequential because one layer supplies the source points for the next.
+
+In the zero- and one-j-invariant modes, only the ball originating at `j` is
+stored. Once that ball has been completely enumerated, the program searches
+it for a pair of Frobenius-conjugate vertices. This is equivalent to
+intersecting the stored ball with the ball originating at `j^p`. In the
+two-j-invariant mode, two explicit balls are enumerated alternately, and
+newly discovered vertices are checked against the other ball immediately.
+
+The first intersection gives a valid degree-bounded path, but prime-major
+enumeration does not guarantee a path of minimum total degree.
+
+If `--B` is omitted, the default is
 
 ```text
 B = floor(N^(1/4)).
 ```
 
-The current implementation supports `2 <= B <= 10000`. The modular-polynomial directory must contain the polynomial for every prime `ell <= B`.
+The supported range is `2 <= B <= 10000`. The modular-polynomial directory
+must contain the polynomial for every prime `ell <= B`. If rerandomization
+is enabled, it must also contain the polynomial for the smallest prime
+larger than `B`.
 
-By default, the program chooses adaptively between Horner evaluation for small batches and FLINT’s product-tree multipoint evaluation for larger batches. The optional flag
+By default, the programs choose adaptively between Horner evaluation for
+small batches and FLINT product-tree multipoint evaluation for larger
+batches. The option
 
-```bash
+```text
 --force-multipoint
 ```
 
-forces every nonempty ball-enumeration batch, including singleton batches, to use multipoint evaluation. This is mainly useful for benchmarking; it may be slower for small batches because constructing the product tree has a fixed cost. The flag does not change the scalar evaluations used for automatic j-invariant generation or for constructing rerandomization walks.
+forces every nonempty ordered-search batch, including singleton batches, to
+use multipoint evaluation. This is primarily useful for benchmarking and can
+be slower for small batches because product-tree construction has a fixed
+cost. It does not affect the scalar evaluations used during automatic
+j-invariant generation or rerandomization walks.
 
-Example:
+`ordered_prime_search.c` is the portable baseline implementation targeting
+FLINT 3.1. It uses FLINT's public polynomial-root interfaces and supports
+both the single-word `fq_nmod` backend and the arbitrary-precision `fq`
+backend.
+
+`ordered_prime_search_flint34.c` is the optimized implementation targeting
+FLINT 3.4, primes smaller than `2^127`, and machines with many CPU cores. Its
+additional optimizations include:
+
+- sharded product-tree construction and multipoint evaluation;
+- parallel evaluation across both coefficients and source points;
+- concurrent computation of initial modular-polynomial specializations;
+- an adaptive root-extraction work queue;
+- cooperative parallel factor trees for underfilled high-degree batches;
+- specialized arithmetic for 65--127-bit primes;
+- a batched cubic root-splitting kernel;
+- shared batching across simultaneous rerandomization searches;
+- optional root-extraction profiling by residual degree.
+
+The FLINT 3.4 version adds the following performance-related options:
+
+```text
+--evaluation-shards n         maximum evaluation shards; 0 selects automatically
+--parallel-factor-tree on|off enable cooperative factor-tree splitting
+--cubic-kernel MODE           MODE is flint, batched, or compare
+--root-profile                report root-extraction CPU time by residual degree
+```
+
+Both versions also accept:
+
+```text
+--multipoint-batch n          maximum points in one batch; 0 means no cap
+--rerandomization-jobs n      rerandomization endpoints considered concurrently
+--force-multipoint            disable adaptive Horner evaluation
+```
+
+For normal use with `ordered_prime_search_flint34.c`, the default settings
+
+```text
+--evaluation-shards 0
+--parallel-factor-tree on
+--cubic-kernel batched
+```
+
+are recommended.
+
+Example using the FLINT 3.1 version:
 
 ```bash
 ./ordered_prime_search \
-    --p 4294967311 \
-    --N 1290 \
+    --pbits 100 \
+    --B 41 \
+    --N 100000 \
     --phi-dir mod_pols \
-    --threads 8 \
-    --force-multipoint
+    --threads 32 \
+    --seed 12345 \
+    --rerandomization off
 ```
 
-Here `B` defaults to `floor(1290^(1/4)) = 5`.
+Example using the FLINT 3.4 optimized version:
+
+```bash
+./ordered_prime_search_flint34 \
+    --pbits 100 \
+    --B 41 \
+    --N 100000 \
+    --phi-dir mod_pols \
+    --threads 64 \
+    --seed 12345 \
+    --rerandomization off
+```
+
+Compile the portable version against FLINT 3.1 with:
+
+```bash
+gcc -O3 -march=native -DNDEBUG -std=gnu11 -Wall -Wextra \
+    -Wno-unused-parameter \
+    ordered_prime_search.c \
+    -pthread -lflint -lmpfr -lgmp -lm \
+    -o ordered_prime_search
+```
+
+Compile the optimized version against FLINT 3.4 with:
+
+```bash
+gcc -O3 -march=native -DNDEBUG -std=gnu11 -Wall -Wextra \
+    -Wno-unused-parameter -Wno-deprecated-declarations \
+    ordered_prime_search_flint34.c \
+    -pthread -lflint -lmpfr -lgmp -lm \
+    -o ordered_prime_search_flint34
+```
 
 ### `random_walk.c`
 
